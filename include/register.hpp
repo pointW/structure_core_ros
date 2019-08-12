@@ -37,6 +37,7 @@
 
 #include <Eigen/Geometry>
 #include <ST/CaptureSession.h>
+#include <sensor_msgs/CameraInfo.h>
 
 void register_convert(const ST::InfraredFrame& ir_frame, const ST::ColorFrame& color_frame, std::vector<uint8_t>& output)
 {
@@ -99,6 +100,85 @@ void register_convert(const ST::InfraredFrame& ir_frame, const ST::ColorFrame& c
             // Validity and Z-buffer checks
             if (reg_ir == 0 || reg_ir > new_ir)
                 reg_ir = new_ir;
+        }
+    }
+}
+
+void register_convert(const ST::DepthFrame& depth_frame, const ST::ColorFrame& color_frame,
+        sensor_msgs::CameraInfo rgb_cinfo, std::vector<uint8_t>& output)
+{
+    // Allocate memory for registered depth image
+    output.resize(2*color_frame.width()*color_frame.height(), 0); // Allocate as all zeroes
+
+    // Extract all the parameters we need
+    double inv_depth_fx = 1.0 / depth_frame.intrinsics().fx;
+    double inv_depth_fy = 1.0 / depth_frame.intrinsics().fy;
+    double depth_cx = depth_frame.intrinsics().cx, depth_cy = depth_frame.intrinsics().cy;
+    double depth_Tx = 0.0, depth_Ty = 0.0;
+//    double rgb_fx = color_frame.intrinsics().fx, rgb_fy = color_frame.intrinsics().fy;
+    double rgb_fx = rgb_cinfo.K.data()[0];
+    double rgb_fy = rgb_cinfo.K.data()[4];
+//    double rgb_cx = color_frame.intrinsics().cx, rgb_cy = color_frame.intrinsics().cy;
+    double rgb_cx = rgb_cinfo.K.data()[2];
+    double rgb_cy = rgb_cinfo.K.data()[5];
+    double rgb_Tx = 0.0, rgb_Ty = 0.0;
+
+    Eigen::Matrix3d rot;
+    const ST::Matrix4 pose = depth_frame.visibleCameraPoseInDepthCoordinateFrame();
+    for(size_t j = 0; j < 4; j++)
+    {
+        for(size_t i = 0; i < 4; i++){
+            rot(j, i) = pose.atRowCol(j, i);
+        }
+    }
+
+    Eigen::Affine3d depth_to_rgb = Eigen::Translation3d(pose.atRowCol(0,3),
+                                                        pose.atRowCol(1,3),
+                                                        pose.atRowCol(2,3)) *
+                                   Eigen::Quaterniond(rot);
+
+
+    // Transform the depth values into the RGB frame
+    /// @todo When RGB is higher res, interpolate by rasterizing depth triangles onto the registered image
+    const float* depth_row = depth_frame.depthInMillimeters();
+    int row_step = depth_frame.width();
+    uint16_t* registered_data = reinterpret_cast<uint16_t*>(output.data());
+    int raw_index = 0;
+    for (unsigned v = 0; v < depth_frame.height(); ++v, depth_row += row_step)
+    {
+        for (unsigned u = 0; u < depth_frame.width(); ++u, ++raw_index)
+        {
+            float raw_depth = depth_row[u];
+            if (!std::isfinite(raw_depth))
+                continue;
+
+            double depth = raw_depth/1000.0;
+
+            /// @todo Combine all operations into one matrix multiply on (u,v,d)
+            // Reproject (u,v,Z) to (X,Y,Z,1) in depth camera frame
+            Eigen::Vector4d xyz_depth;
+            xyz_depth << ((u - depth_cx)*depth - depth_Tx) * inv_depth_fx,
+                    ((v - depth_cy)*depth - depth_Ty) * inv_depth_fy,
+                    depth,
+                    1;
+
+            // Transform to RGB camera frame
+            Eigen::Vector4d xyz_rgb = depth_to_rgb * xyz_depth;
+
+            // Project to (u,v) in RGB image
+            double inv_Z = 1.0 / xyz_rgb.z();
+            int u_rgb = (rgb_fx*xyz_rgb.x() + rgb_Tx)*inv_Z + rgb_cx + 0.5;
+            int v_rgb = (rgb_fy*xyz_rgb.y() + rgb_Ty)*inv_Z + rgb_cy + 0.5;
+
+            if (u_rgb < 0 || u_rgb >= (int)color_frame.width() ||
+                v_rgb < 0 || v_rgb >= (int)color_frame.height())
+                continue;
+
+            uint16_t& reg_depth = registered_data[v_rgb*color_frame.width() + u_rgb];
+            uint16_t new_depth = 1000.0*xyz_rgb.z();
+            // Validity and Z-buffer checks
+            if (reg_depth == 0 || reg_depth > new_depth)
+                reg_depth = new_depth;
         }
     }
 }

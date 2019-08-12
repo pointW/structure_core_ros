@@ -210,12 +210,16 @@ class SessionDelegate : public ST::CaptureSessionDelegate {
                 return;
             }
             std::string visible_frame_id = camera_name + "_rgb_optical_frame";
-            visible_image_pub_.publish(imageFromVisibleFrame(visible_frame_id, f));
+            sensor_msgs::ImagePtr image_msg = imageFromVisibleFrame(visible_frame_id, f);
+            visible_image_pub_.publish(image_msg);
             if (! info_loded) {
                 rgb_cinfo_->setCameraInfo(*infoFromFrame(visible_frame_id, f));
             }
 //            visible_info_pub_.publish(infoFromFrame(visible_frame_id, f));
-            visible_info_pub_.publish(rgb_cinfo_->getCameraInfo());
+            sensor_msgs::CameraInfoPtr ci(new sensor_msgs::CameraInfo(rgb_cinfo_->getCameraInfo()));
+            ci->header.frame_id = image_msg->header.frame_id;
+            ci->header.stamp = image_msg->header.stamp;
+            visible_info_pub_.publish(ci);
         }
 
         void publishInfraredFrame(const ST::InfraredFrame& f, bool as_8bit=false)
@@ -249,14 +253,16 @@ class SessionDelegate : public ST::CaptureSessionDelegate {
             msg->width = visual.width();
             msg->step = 2*visual.width();
             msg->is_bigendian = 0;
-            register_convert(depth, visual, msg->data);
+
+            register_convert(depth, visual, rgb_cinfo_->getCameraInfo(), msg->data);
 
             // Camera info is same as visual, but with depth timestamp
-            auto info = infoFromFrame(msg->header.frame_id, visual);
-            info->header.stamp = msg->header.stamp;
+            sensor_msgs::CameraInfoPtr ci(new sensor_msgs::CameraInfo(rgb_cinfo_->getCameraInfo()));
+            ci->header.frame_id = msg->header.frame_id;
+            ci->header.stamp = msg->header.stamp;
 
             depth_color_aligned_pub_.publish(msg);
-            depth_color_aligned_info_pub_.publish(info);
+            depth_color_aligned_info_pub_.publish(ci);
         }
 
         void publishDepthIRAligned(const ST::DepthFrame& depth, const ST::InfraredFrame& ir)
@@ -380,8 +386,9 @@ class SessionDelegate : public ST::CaptureSessionDelegate {
         {
             if (rgb_cinfo_->validateURL(url))
             {
-                rgb_cinfo_->loadCameraInfo(url);
-                info_loded = true;
+                if (rgb_cinfo_->loadCameraInfo(url)) {
+                    info_loded = true;
+                }
             }
         }
 
